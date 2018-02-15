@@ -1,0 +1,179 @@
+#!/usr/bin/env python2.7
+
+import argparse, subprocess, os, gzip, logging, time, collections, HTSeq
+from itertools import izip_longest
+
+logging.basicConfig(filename='spliceSeq.log', filemode='w', format='%(asctime)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
+
+def main(args):
+
+	global_start_time = time.time()
+
+	for i in args.input_files:
+
+		infile = i.split('/')[-1]
+		logging.info(' Processing %s' % (infile))
+		
+		# Create folder for each sample
+		if not os.path.exists(infile):
+			os.makedirs(infile)
+		
+		# Extract Molecular Counter and Remove PCR Duplicates
+		if not args.skipPCRMC:
+			logging.info('\tRemoving PCR Duplicates and Extracting Molecular Counter')
+			removePCRDuplicates_ExtractMolecularCounter(i, infile, args.moleCountLen)
+		else:
+			logging.info('\tSkipping Removal of PCR Duplicates and Extracting Molecular Counter')
+
+		# Trim adapter sequences
+		if not args.skipTrim:
+			logging.info('\tTrimming Adapter Sequences')
+			trimAdapters(infile)
+		else:
+			logging.info('\tSkipping Trimming of Adapter Sequences')
+
+		# Alignment
+		if not args.skipAlignment:
+			logging.info('\tAligning Reads to Genome')
+			align(infile)
+		else:
+			logging.info('\tSkipping Alignment of Reads to Genome')
+
+		# Pool Reads
+		if not args.skipPool:
+			logging.info('\tPooling Reads')
+			pool(infile)
+		else:
+			logging.info('\tSkipping Pooling of Reads')
+
+
+	logging.info('Total Time: %ds' % (time.time()-global_start_time))
+
+def removePCRDuplicates_ExtractMolecularCounter(full_path, infile, n):
+
+	occured = set()
+	numProcessed = 0
+	numUnique = 0
+	out1 = []
+	local_start_time = time.time()
+
+	with gzip.open('%s.fastq.gz' % (full_path)) as i1:
+		for line1 in i1:
+			
+			info1 = line1.rstrip().split(' ')[0]
+
+			seq1 = next(i1).rstrip()
+			extra1 = next(i1).rstrip()
+			quality1 = next(i1).rstrip()
+
+			if (seq1) not in occured:
+				out1.append('%s;%s\n%s\n%s\n%s\n' % (info1, seq1[:n], seq1[n:], extra1, quality1[n:]))
+				numUnique += 1
+				occured.add(seq1)
+
+			if numProcessed % 1000000 == 0:
+				logging.info('\t\tProcessed %d Reads in %ds' % (numProcessed, time.time()-local_start_time))
+
+			numProcessed += 1
+
+	logging.info('\t\tProcessed %d Total Reads in %ds' % (numProcessed, time.time()-local_start_time))
+
+	logging.info('\t\tWriting Processed Read 1')
+	start_time = time.time()
+	with gzip.open('%s/%s_dupMole.fastq.gz' % (infile, infile) ,'wb') as out:
+		out.write(''.join(out1))
+	logging.info('\t\t\tWrote %d reads in %ds' % (numUnique, time.time()-start_time))
+
+def trimAdapters(infile):
+	trimmomatic_path = '/opt/Trimmomatic-0.36/'
+	trimmomatic_jar = 'trimmomatic-0.36.jar'
+	cmd = 'java -jar %s%s SE -phred33 %s/%s_dupMole.fastq.gz %s/%s_trim.fastq.gz ILLUMINACLIP:%sadapters/NexteraPE-PE.fa:2:30:10 MINLEN:5' % (trimmomatic_path, trimmomatic_jar, infile, infile, infile, infile, trimmomatic_path)
+	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+	(out, err) = proc.communicate()
+        with open('%s/%s_trim.log' % (infile, infile), 'w') as trimOut:
+		trimOut.write(err)
+	info = err.split('\n')[9].split(' ')
+	logging.info('\t\tInput Read Pairs: %s\n\t\t\t\tSurviving: %s\n\t\t\t\tDropped: %s' % (info[2], info[4], info[7]))
+
+def align(infile):
+	cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 -x ~/Lab/Genomes/pombe/hisat/sp_hisatIndex_v2.30 -U %s/%s_trim.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s.bam' % (infile, infile, infile, infile)
+	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+	(out, err) = proc.communicate()
+	with open('%s/%s_alignment.log' % (infile, infile), 'w') as alignOut:
+		alignOut.write(err)
+
+def pool(infile):
+	interval_path = '/home/zdwyer/Lab/Genomes/pombe/sp_intronRanges_v2.30.txt'
+	# Read in features
+	feats = set()
+	features = HTSeq.GenomicArrayOfSets("auto", stranded=False)
+	for line in open(interval_path):
+		fields = line.rstrip().split('\t')
+		iv = HTSeq.GenomicInterval(fields[1], int(fields[2])-1, int(fields[3]))
+		features[iv] += fields[0]
+		feats.add(fields[0])
+
+	unspliced_counts = collections.Counter()
+	spliced_counts = collections.Counter()
+
+	almnt_file = HTSeq.BAM_Reader('%s/%s.bam' % (infile, infile))
+	for almnt in almnt_file:
+		if almnt.pe_which != 'second' and almnt.aQual > 5:
+			spliced = False
+			for item in almnt.cigar:
+				if item.type == 'N':
+					spliced = True
+			if not almnt.aligned:
+				if spliced:
+					spliced_counts[ "_unmapped" ] += 1
+					continue
+				else:
+					spliced_counts[ "_unmapped" ] += 1
+					continue
+			gene_ids = set()
+			for iv, val in features[ almnt.iv ].steps():
+				gene_ids |= val
+			if len(gene_ids) == 1:
+				gene_id = list(gene_ids)[0]
+				if spliced:
+					spliced_counts[ gene_id ] += 1
+				else:
+					unspliced_counts[ gene_id ] += 1
+			elif len(gene_ids) == 0:
+				if spliced:
+					spliced_counts[ "_no_feature" ] += 1
+				else:
+					unspliced_counts[ "_no_feature" ] += 1
+			else:
+				if spliced:
+					spliced_counts[ "_ambiguous" ] += 1
+				else:
+					unspliced_counts[ "_ambiguous" ] += 1
+	
+	counts = []
+	for feature in sorted(feats):
+		counts.append('%s\t%d\t%d\n' % (feature, spliced_counts[feature], unspliced_counts[feature]))
+	
+	with open('%s/%s_counts.txt' % (infile, infile), 'w') as poolOut:
+		poolOut.write(''.join(counts))
+
+
+def parseArguments():
+  parser = argparse.ArgumentParser(prog="SpliceSeq_PipeLine", description='', usage='%(prog)s [options]')
+  required = parser.add_argument_group('required arguments')
+  dup_mole = parser.add_argument_group('Extracting Molecular Counter / PCR Duplicate Removal Options')
+  trim = parser.add_argument_group('Trimming Options')
+  alignment = parser.add_argument_group('Alignment Options')
+  pool = parser.add_argument_group('Pooling Options')
+  required.add_argument('-i', '--input_files', nargs='+', required=True, help=' Basename of files to run. (fastq.gz)', metavar='', dest='input_files')
+  dup_mole.add_argument('-m', '--molecularCounterLen', type=int, default=7, help=" Length of Molecular Counter at 5' end of Read 1. (Default: 7)", metavar='', dest='moleCountLen')
+  dup_mole.add_argument('--skip_PCRMC', action='store_true', help=' Skip the removal of PCR duplicates and extraction of the molecular counter. Assumes files already exist.', dest='skipPCRMC')
+  trim.add_argument('--skip_Trim', action='store_true', help=' Skip the trimming of adapter sequences. Assumes files already exist.', dest='skipTrim')
+  alignment.add_argument('--skip_Align', action='store_true', help=' Skip the alignment of reads to genome. Assumes files already exist.', dest='skipAlignment')
+  pool.add_argument('--skip_Pool', action='store_true', help=' Skip the pooling of reads. Assumes files already exist.', dest='skipPool')
+
+
+  return parser.parse_args()
+  
+args = parseArguments()
+main(args)
