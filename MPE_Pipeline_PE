@@ -54,7 +54,7 @@ def main(args):
 		# Pool Reads
 		if not args.skipPool:
 			logging.info('\tPooling Reads')
-			pool(infile, introns)
+			pool(infile, introns, args.junction_anchor)
 		else:
 			logging.info('\tSkipping Pooling of Reads')
 
@@ -128,7 +128,7 @@ def align(infile, index):
 	with open('%s/%s_alignment.log' % (infile, infile), 'w') as alignOut:
 		alignOut.write(err)
 
-def pool(infile, introns):
+def pool(infile, introns, junction_anchor):
 	intron_counts = collections.Counter()
 	junction_counts = collections.Counter()
 
@@ -142,23 +142,43 @@ def pool(infile, introns):
 	for first, second in HTSeq.pair_SAM_alignments_with_buffer(HTSeq.BAM_Reader('%s/%s.bam' % (infile, infile))):
 		intron_ids = set()
 		junction_ids = set()
+					potential_junction_ids = set()
 		if first != None and first.aligned and first.aQual > 5:
-			print first.cigar
+			pre_match = False
+			junction_occured = False
 			for cigop in first.cigar:
 				if cigop.type == 'M':
+					if not junction_occured:
+						pre_match = cigop.size > junction_anchor
+					else:
+						if pre_match and cigop.size > junction_anchor:
+							junction_ids |= potential_junction_ids
+							pre_match = cigop.size > junction_anchor
+							junction_occured = False
 					for iv, val in introns[cigop.ref_iv].steps():
 						intron_ids |= val
 				elif cigop.type == 'N':
+					junction_occured = True
 					for iv, val in introns[cigop.ref_iv].steps():
-						junction_ids |= val
+						potential_junction_ids |= val
 		if second != None and second.aligned and second.aQual > 5:
+			pre_match = False
+			junction_occured = False
 			for cigop in second.cigar:
 				if cigop.type == 'M':
+					if not junction_occured:
+						pre_match = cigop.size > junction_anchor
+					else:
+						if pre_match and cigop.size > junction_anchor:
+							junction_ids |= potential_junction_ids
+							pre_match = cigop.size > junction_anchor
+							junction_occured = False
 					for iv, val in introns[cigop.ref_iv].steps():
 						intron_ids |= val
-				elif cigop.type =='N':
+				elif cigop.type == 'N':
+					junction_occured = True
 					for iv, val in introns[cigop.ref_iv].steps():
-						junction_ids |= val
+						potential_junction_ids |= val
 
 		candidateGenes = set()
 		for i in intron_ids:
@@ -196,7 +216,7 @@ def pool(infile, introns):
 			splicingOut.write('%s\t%d\t%d\n' % (feature, junction_counts[feature], intron_counts[feature]))
 
 def parseArguments():
-	parser = argparse.ArgumentParser(prog="SpliceSeq_PipeLine", description='', usage='%(prog)s [options]')
+	parser = argparse.ArgumentParser(prog="MPE_PipeLine_PE", description='', usage='%(prog)s [options]')
 	required = parser.add_argument_group('required arguments')
 	dup_mole = parser.add_argument_group('Extracting Molecular Counter / PCR Duplicate Removal Options')
 	trim = parser.add_argument_group('Trimming Options')
@@ -212,6 +232,7 @@ def parseArguments():
 	alignment.add_argument('--hisat_index', default='~/Lab/Genomes/pombe/hisat/sp_hisatIndex_v2.30', help=' Location of hisat index files.', dest='hisatIndex')
 	pool.add_argument('--skip_Pool', action='store_true', help=' Skip the pooling of reads. Assumes files already exist.', dest='skipPool')
 	pool.add_argument('--intron_intervals', default='/home/zdwyer/Lab/Genomes/pombe/sp_intronRanges_v2.30.txt', help=' File containing intervals for which to count reads.', dest='intron_intervals')
+	pool.add_argument('--junction_anchor', default=3, type=int, help=' Required length of anchor on each side of junction.', dest='junction_anchor')
 	return parser.parse_args()
 
 args = parseArguments()
