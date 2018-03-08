@@ -47,7 +47,7 @@ def main(args):
 		# Alignment
 		if not args.skipAlignment:
 			logging.info('\tAligning Reads to Genome')
-			align(infile, args.hisatIndex)
+			align(infile, args.hisatIndex, args.skipSingletons)
 		else:
 			logging.info('\tSkipping Alignment of Reads to Genome')
 
@@ -121,12 +121,35 @@ def trimAdapters(infile, trimmomatic_jar, trimmomatic_adapters):
 	info = err.split('\n')[9].split(' ')
 	logging.info('\t\tInput Read Pairs: %s\n\t\t\t\tBoth Surviving: %s\n\t\t\t\tForward Only Surviving: %s\n\t\t\t\tReverse Only Surviving: %s\n\t\t\t\tDropped: %s' % (info[3], info[6], info[11], info[16], info[19]))
 
-def align(infile, index):
-	cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 -x %s -1 %s/%s_R1_P.fastq.gz -2 %s/%s_R2_P.fastq.gz | samtools view -bh -q 5 - | samtools sort - -o %s/%s.bam' % (index, infile, infile, infile, infile, infile, infile)
+def align(infile, index, skipSingletons):
+	logging.info('\t\tUsing hisat index at %s' % (index))
+	logging.info('\t\tAligning Paired Reads')
+	cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 --un-conc-gz %s/%s_unaligned_R%%.fastq.gz -x %s -1 %s/%s_R1_P.fastq.gz -2 %s/%s_R2_P.fastq.gz | samtools view -bh -q 5 - | samtools sort - -o %s/%s.bam' % (infile, infile, index, infile, infile, infile, infile, infile, infile)
 	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
 	(out, err) = proc.communicate()
 	with open('%s/%s_alignment.log' % (infile, infile), 'w') as alignOut:
+		if not skipSingletons:
+			alignOut.write("Paired Reads:\n")
 		alignOut.write(err)
+
+	if not skipSingletons:
+		logging.info('\t\tAligning R1 Singletons')
+		cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 -x %s -U %s/%s_R1_U.fastq.gz | samtools view -bh -q 5 - | samtools sort - -o %s/%s_singleR1.bam' % (index, infile, infile, infile, infile)
+		proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+		(out, err) = proc.communicate()
+		with open('%s/%s_alignment.log' % (infile, infile), 'a') as alignOut:
+			alignOut.write("\nR1 Singletons:\n")
+			alignOut.write(err)
+
+		logging.info('\t\tAligning R2 Singletons')
+		cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 -x %s -U %s/%s_R2_U.fastq.gz | samtools view -bh -q 5 - | samtools sort - -o %s/%s_singleR2.bam' % (index, infile, infile, infile, infile)
+		proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+		(out, err) = proc.communicate()
+		with open('%s/%s_alignment.log' % (infile, infile), 'a') as alignOut:
+			alignOut.write("\nR2 Singletons:\n")
+			alignOut.write(err)
+	else:
+		logging.info('\t\tSkipping Alignment of singletons resulting from trimming')
 
 def pool(infile, introns, junction_anchor):
 	intron_counts = collections.Counter()
@@ -142,7 +165,7 @@ def pool(infile, introns, junction_anchor):
 	for first, second in HTSeq.pair_SAM_alignments_with_buffer(HTSeq.BAM_Reader('%s/%s.bam' % (infile, infile))):
 		intron_ids = set()
 		junction_ids = set()
-					potential_junction_ids = set()
+		potential_junction_ids = set()
 		if first != None and first.aligned and first.aQual > 5:
 			pre_match = False
 			junction_occured = False
@@ -226,10 +249,11 @@ def parseArguments():
 	dup_mole.add_argument('-m', '--molecularCounterLen', type=int, default=7, help=" Length of Molecular Counter at 5' end of Read 1. (Default: 7)", metavar='', dest='moleCountLen')
 	dup_mole.add_argument('--skip_PCRMC', action='store_true', help=' Skip the removal of PCR duplicates and extraction of the molecular counter. Assumes files already exist.', dest='skipPCRMC')
 	trim.add_argument('--skip_Trim', action='store_true', help=' Skip the trimming of adapter sequences. Assumes files already exist.', dest='skipTrim')
-	trim.add_argument('--trimmomatic_path', default='/opt/Trimmomatic-0.36/trimmomatic-0.36.jar', help=' Path to Trimmomatic jar file.', dest='trimJar')
-	trim.add_argument('--trimmomatic_jar', default='/opt/Trimmomatic-0.36/adapters/NexteraPE-PE.fa', help=' Path to adapter file.', dest='trimAdapter')
+	trim.add_argument('--trimmomatic_jar', default='/opt/Trimmomatic-0.36/trimmomatic-0.36.jar', help=' Path to Trimmomatic jar file.', dest='trimJar')
+	trim.add_argument('--trimmomatic_adapter', default='/opt/Trimmomatic-0.36/adapters/NexteraPE-PE.fa', help=' Path to adapter file.', dest='trimAdapter')
 	alignment.add_argument('--skip_Align', action='store_true', help=' Skip the alignment of reads to genome. Assumes files already exist.', dest='skipAlignment')
 	alignment.add_argument('--hisat_index', default='~/Lab/Genomes/pombe/hisat/sp_hisatIndex_v2.30', help=' Location of hisat index files.', dest='hisatIndex')
+	alignment.add_argument('--skip_Singletons', action='store_true', help=' Do not attempt to align singleton reads resulting from trimming.', dest='skipSingletons')
 	pool.add_argument('--skip_Pool', action='store_true', help=' Skip the pooling of reads. Assumes files already exist.', dest='skipPool')
 	pool.add_argument('--intron_intervals', default='/home/zdwyer/Lab/Genomes/pombe/sp_intronRanges_v2.30.txt', help=' File containing intervals for which to count reads.', dest='intron_intervals')
 	pool.add_argument('--junction_anchor', default=3, type=int, help=' Required length of anchor on each side of junction.', dest='junction_anchor')
