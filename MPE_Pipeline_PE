@@ -4,101 +4,158 @@
 
 import argparse, subprocess, os, gzip, logging, time, collections, HTSeq
 from itertools import izip_longest
+from collections import defaultdict
+from multiprocessing import Pool
 
-logging.basicConfig(filename='spliceSeq.log', filemode='w', format='%(asctime)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
+logging.basicConfig(filename='MPE-seq.log', filemode='w', format='%(asctime)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
 
 def main(args):
 
-	global_start_time = time.time()
+	start_time = time.time()
+
 	samples = []
+	summary = {}
 
-	logging.info('Reading intron ranges from %s' % (args.intron_intervals))
-	introns = HTSeq.GenomicArrayOfSets("auto", stranded=False)
-	for line in open(args.intron_intervals):
+	setup(args)
+
+	targets, intron_set, fiveSS, threeSS = readTargetFeatures(args.target_intervals)
+
+	p = Pool(8)
+	p.map(processSample, ((sample.split('/')[-1], args, targets, intron_set, fiveSS, threeSS, summary) for sample in args.input_files))
+	p.close()
+	p.join()
+	
+	#for i in args.input_files:
+	#	sample = i.split('/')[-1]
+	#	samples.append(sample)
+	#	processSample((sample, args, targets, intron_set, fiveSS, threeSS, summary))
+
+	#printSummary(samples, summary)
+
+	logging.info('Completed in %ds' % (time.time() - start_time))
+
+def setup(args):
+	
+	SI_summary = open('SI_summary.txt', 'w')
+	SI_summary.write('Sample\tIntron\tMature\tPremature\n')
+	SI_summary.close()
+
+	Junction_summary = open('Junction_summary.txt', 'w')
+	Junction_summary.write('Sample\tGene\tUpstream\tDownstream\tType\tCount\n')
+	Junction_summary.close()
+
+	logging.info('Using hisat index at %s' % (args.hisatIndex))
+
+def readTargetFeatures(interval):
+	logging.info('Reading intron ranges from %s' % (interval))
+	intron_set = set()
+	fiveSS = {}
+	threeSS = {}
+	targets = HTSeq.GenomicArrayOfSets('auto', stranded=False)
+	for line in open(interval):
 		fields = line.rstrip().split('\t')
-		iv = HTSeq.GenomicInterval(fields[1], int(fields[2])-1, int(fields[3]))
-		introns[iv] += fields[0]
-
-	target_repos = processTargets(args.targets)
-
-
-	for n, i in enumerate(args.input_files):
-
-		sample_start_time = time.time()
-
-		infile = i.split('/')[-1]
-		logging.info(' Processing %s' % (infile))
-		
-		samples.append(infile)
-
-		# Create folder for each sample
-		if not os.path.exists(infile):
-			os.makedirs(infile)
-
-		# Trim adapter sequences
-		if not args.skipTrim:
-			logging.info('\tTrimming Adapter Sequences')
-			trimAdapters(i, infile, args.trimJar, args.trimAdapter)
+		iv = HTSeq.GenomicInterval(fields[0], int(fields[1])-1, int(fields[2]), fields[4])
+		targets[iv] += fields[3]
+		intron_set.add(fields[3])
+		if fields[4] == '+':
+			fiveSS[(fields[0], int(fields[1]), fields[4])] = tuple(fields[3].split(';'))
+			threeSS[(fields[0], int(fields[2]), fields[4])] = tuple(fields[3].split(';'))
 		else:
-			logging.info('\tSkipping Trimming of Adapter Sequences')
-		
-		# Extract Molecular Counter and Remove PCR Duplicates
-		if not args.skipPCRMC:
-			logging.info('\tRemoving PCR Duplicates and Extracting Molecular Counter')
-			removePCRDuplicates_ExtractMolecularCounter(infile, args.moleCountLen)
-		else:
-			logging.info('\tSkipping Removal of PCR Duplicates and Extracting Molecular Counter')
+			fiveSS[(fields[0], int(fields[2]), fields[4])] = tuple(fields[3].split(';'))
+			threeSS[(fields[0], int(fields[1]), fields[4])] = tuple(fields[3].split(';'))
 
-		# Alignment
-		if not args.skipAlignment:
-			logging.info('\tAligning Reads to Genome')
-			align(infile, args.hisatIndex, args.skipSingletons, target_repos)
-		else:
-			logging.info('\tSkipping Alignment of Reads to Genome')
+	return targets, intron_set, fiveSS, threeSS
 
-
-		# Pool Reads
-		if not args.skipPool:
-			logging.info('\tPooling Reads')
-			pool(infile, introns, args.junction_anchor)
-		else:
-			logging.info('\tSkipping Pooling of Reads')
-
-	logging.info('Total Time: %ds' % (time.time()-global_start_time))
-
-def processTargets(infile):
+def processSample(x):
 	
-	repos = {}
-	
-	for line in open(infile):
-		cur = line.rstrip().split('\t')
-		target_seq = cur[4]
-		for pos in range(24):
-			for base in ['A', 'C', 'G', 'T']:
-				repos['%s%s%s' % (target_seq[:pos], base, target_seq[pos+1:])] = ('%s;%s' % (cur[0], cur[1]), len(target_seq))
-	
-	return repos
+	sample, args, targets, intron_set, fiveSS, threeSS, summary = x
 
-def trimAdapters(full_path, infile, trimmomatic_jar, trimmomatic_adapters):
-	cmd = 'java -jar %s PE -phred33 %s_R1.fastq.gz %s_R2.fastq.gz %s/%s_R1_P.fastq.gz %s/%s_R1_U.fastq.gz %s/%s_R2_P.fastq.gz %s/%s_R2_U.fastq.gz ILLUMINACLIP:%s:2:30:10:2:true' % (trimmomatic_jar, full_path, full_path, infile, infile, infile, infile, infile, infile, infile, infile, trimmomatic_adapters)
+	logging.info(' Processing %s' % (sample))
+	sample_summary = {}
+
+	# Create folder for sample
+	if not os.path.exists(sample):
+		os.makedirs(sample)
+
+	# Trim Adapters
+	trimAdapters(sample, summary)
+
+	#Extract molecular counter and remove PCR duplicates
+	if args.umi_deduplication:
+		removePCRDuplicates_ExtractMolecularCounter(sample, args.moleCountLen, summary)
+	else:
+		extractMolecularCounter(sample, args.moleCountLen, summary)
+
+	# Alignment
+	align(sample, args.hisatIndex, summary)
+
+	# Count features
+	feature_count(sample, targets, intron_set, fiveSS, threeSS, summary)
+
+	logging.info(' Completed %s' % (sample))
+
+def trimAdapters(sample, summary):
+	cmd = 'fastp -i ../fastq/%s_R1.fastq.gz -I ../fastq/%s_R2.fastq.gz -o %s/%s_trim_R1.fastq.gz -O %s/%s_trim_R2.fastq.gz -w 1 --adapter_sequence CTGTCTCTTATACACATCT --adapter_sequence_r2 CTGTCTCTTATACACATCT --html %s/%s_trim_report.html --json %s/%s_trim_report.json' % (sample, sample, sample, sample, sample, sample, sample, sample, sample, sample)
 	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
 	(out, err) = proc.communicate()
-	with open('%s/%s_trim.log' % (infile, infile), 'w') as trimOut:
-		trimOut.write(err)
-	info = err.split('\n')[9].split(' ')
-	#logging.info('\t\tInput Read Pairs: %s\n\t\t\t\tBoth Surviving: %s\n\t\t\t\tForward Only Surviving: %s\n\t\t\t\tReverse Only Surviving: %s\n\t\t\t\tDropped: %s' % (info[3], info[6], info[11], info[16], info[19]))
+	info = err.split('\n')
 
-def removePCRDuplicates_ExtractMolecularCounter(infile, n):
+def extractMolecularCounter(sample, n, summary):
+
+	numProcessed = 0
+	toOut1 = []
+	toOut2 = []
+
+	out1 = gzip.open('%s/%s_mole_R1.fastq.gz' % (sample, sample) ,'wb')
+	out2 = gzip.open('%s/%s_mole_R2.fastq.gz' % (sample, sample) ,'wb')
+
+	with gzip.open('%s/%s_trim_R1.fastq.gz' % (sample, sample)) as i1, gzip.open('%s/%s_trim_R2.fastq.gz' % (sample, sample)) as i2:
+		for line1, line2 in izip_longest(i1, i2):
+			
+			info1 = line1.rstrip().split(' ')[0]
+			info2 = line2.rstrip().split(' ')[0]
+
+			seq1 = next(i1).rstrip()
+			extra1 = next(i1).rstrip()
+			quality1 = next(i1).rstrip()
+
+			seq2 = next(i2).rstrip()
+			extra2 = next(i2).rstrip()
+			quality2 = next(i2).rstrip()
+ 
+			if info1 != info2:
+				print 'Error: %s does not match %s' % (info1, info2)
+			
+			if len(seq1) > 13:
+				toOut1.append('%s;%s\n%s\n%s\n%s\n' % (info1, seq1[:n], seq1[n:], extra1, quality1[n:]))
+				toOut2.append('%s;%s\n%s\n%s\n%s\n' % (info2, seq1[:n], seq2, extra2, quality2))
+
+			if numProcessed % 1000000 == 0:
+				out1.write(''.join(toOut1))
+				out2.write(''.join(toOut2))
+				toOut1 = []
+				toOut2 = []
+
+			numProcessed += 1
+
+	out1.write(''.join(toOut1))
+	out2.write(''.join(toOut2))
+	out1.close()
+	out2.close()
+
+	summary[(sample, 'unique')] = numProcessed
+
+def removePCRDuplicates_ExtractMolecularCounter(sample, n, summary):
 
 	occured = set()
 	numProcessed = 0
 	numUnique = 0
-	numShort = 0
 	out1 = []
 	out2 = []
-	local_start_time = time.time()
+	s = {}
 
-	with gzip.open('%s/%s_R1_P.fastq.gz' % (infile, infile)) as i1, gzip.open('%s/%s_R2_P.fastq.gz' % (infile, infile)) as i2:
+
+	with gzip.open('%s/%s_trim_R1.fastq.gz' % (sample, sample)) as i1, gzip.open('%s/%s_trim_R2.fastq.gz' % (sample, sample)) as i2:
 		for line1, line2 in izip_longest(i1, i2):
 			
 			info1 = line1.rstrip().split(' ')[0]
@@ -115,9 +172,7 @@ def removePCRDuplicates_ExtractMolecularCounter(infile, n):
 			if info1 != info2:
 				print 'Error: %s does not match %s' % (info1, info2)
 
-			if len(seq1) < n + 10 or len(seq2) < n:
-				numShort += 1
-			elif (seq1, seq2) not in occured:
+			if (seq1, seq2) not in occured:
 				out1.append('%s;%s\n%s\n%s\n%s\n' % (info1, seq1[:n], seq1[n:], extra1, quality1[n:]))
 				out2.append('%s;%s\n%s\n%s\n%s\n' % (info2, seq1[:n], seq2, extra2, quality2))
 				numUnique += 1
@@ -128,325 +183,119 @@ def removePCRDuplicates_ExtractMolecularCounter(infile, n):
 
 			numProcessed += 1
 
-	logging.info('\t\tProcessed %d Total Reads in %ds' % (numProcessed, time.time()-local_start_time))
-	logging.info('\t\t\t%d unique reads (%.2f%%)' % (numUnique, numUnique*100.0/numProcessed))
-	logging.info('\t\t\t%d reads removed for being shorter than %d bp' % (numShort, n+10))
-
-	logging.info('\t\tWriting Processed Read 1')
-	start_time = time.time()
-	with gzip.open('%s/%s_R1_dupMole.fastq.gz' % (infile, infile) ,'wb') as out:
+	with gzip.open('%s/%s_mole_R1.fastq.gz' % (sample, sample) ,'wb') as out:
 		out.write(''.join(out1))
-	logging.info('\t\t\tWrote %d reads in %ds' % (numUnique, time.time()-start_time))
 
-	logging.info('\t\tWriting Processed Read 2')
-	start_time = time.time()
-	with gzip.open('%s/%s_R2_dupMole.fastq.gz' % (infile, infile) , 'wb') as out:
+	with gzip.open('%s/%s_mole_R2.fastq.gz' % (sample, sample) , 'wb') as out:
 		out.write(''.join(out2))
-	logging.info('\t\t\tWrote %d reads in %ds' % (numUnique, time.time()-start_time))
 
-def align(infile, index, skipSingletons, target_repos):
-	logging.info('\t\tUsing hisat index at %s' % (index))
-	logging.info('\t\tAligning Paired Reads')
-	cmd = 'hisat2 -p 4 --phred33 --new-summary --max-intronlen 1000 --un-conc-gz %s/%s_unaligned_R%%.fastq.gz -x %s -1 %s/%s_R1_dupMole.fastq.gz -2 %s/%s_R2_dupMole.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s.bam' % (infile, infile, index, infile, infile, infile, infile, infile, infile)
+	summary[(sample, 'unique')] = numUnique
+
+def align(sample, index, summary):
+	cmd = 'hisat2 -p 1 --phred33 --new-summary --max-intronlen 1000 -x %s -1 %s/%s_mole_R1.fastq.gz -2 %s/%s_mole_R2.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s.bam' % (index, sample, sample, sample, sample, sample, sample)
 	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
 	(out, err) = proc.communicate()
-	with open('%s/%s_alignment.log' % (infile, infile), 'w') as alignOut:
-		if not skipSingletons:
-			alignOut.write("Paired Reads:\n")
+
+	with open('%s/%s_alignment.log' % (sample, sample), 'w') as alignOut:
 		alignOut.write(err)
+	info = err.split('\n')
 
-	cmd = 'bedtools bamtobed -i %s/%s.bam | bedtools merge -o count -c 4 -i stdin | bedtools intersect -b ~/Lab/MPE/pombe/oligoMix_Locations.bed -a stdin -v | sort -k4,4nr > %s/%s_offtargets.bed' % (infile, infile, infile, infile)
-	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-	(out, err) = proc.communicate()
+def feature_count(sample, targets, intron_set, fiveSS, threeSS, summary):
 
-	cmd = 'samtools view -bh -q 5 %s/%s.bam > %s/%s_mapq.bam' % (infile, infile, infile, infile)
-	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-	(out, err) = proc.communicate()
-
-	cmd = 'bedtools bamtobed -i %s/%s_mapq.bam | bedtools merge -o count -c 4 -i stdin | bedtools intersect -b ~/Lab/MPE/pombe/oligoMix_Locations.bed -a stdin -v | sort -k4,4nr > %s/%s_offtargets.bed' % (infile, infile, infile, infile)
-	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-	(out, err) = proc.communicate()
-
-	if not skipSingletons:
-		logging.info('\t\tAligning R1 Singletons')
-		cmd = 'hisat2 -p 4 --phred33 --new-summary --max-intronlen 1000 -x %s -U %s/%s_R1_U.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s_singleR1.bam' % (index, infile, infile, infile, infile)
-		proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-		(out, err) = proc.communicate()
-		with open('%s/%s_alignment.log' % (infile, infile), 'a') as alignOut:
-			alignOut.write("\nR1 Singletons:\n")
-			alignOut.write(err)
-
-		logging.info('\t\tAligning R2 Singletons')
-		cmd = 'hisat2 -p 4 --phred33 --new-summary --max-intronlen 1000 -x %s -U %s/%s_R2_U.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s_singleR2.bam' % (index, infile, infile, infile, infile)
-		proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-		(out, err) = proc.communicate()
-		with open('%s/%s_alignment.log' % (infile, infile), 'a') as alignOut:
-			alignOut.write("\nR2 Singletons:\n")
-			alignOut.write(err)
-	else:
-		logging.info('\t\tSkipping Alignment of singletons resulting from trimming')
-
-	if not args.skipSplit:
-		logging.info('\t\tSplitting Reads')
-		splitReads(infile, target_repos)
-		logging.info('\t\tAligning Split Reads')
-		cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 -x %s -1 %s/%s_R1_split.fastq.gz -2 %s/%s_R2_split.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s_split.bam' % (index, infile, infile, infile, infile, infile, infile)
-		proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-		(out, err) = proc.communicate()
-		with open('%s/%s_alignment_split.log' % (infile, infile), 'w') as alignOut:
-			if not skipSingletons:
-				alignOut.write("Paired Reads:\n")
-			alignOut.write(err)
-
-def splitReads(infile, target_repos):
-
-	out1 = []
-	out2 = []
-
-	with gzip.open('%s/%s_unaligned_R1.fastq.gz' % (infile, infile)) as i1, gzip.open('%s/%s_unaligned_R2.fastq.gz' % (infile, infile)) as i2:
-		for line1, line2 in izip_longest(i1, i2):
+	SI_counts = defaultdict(int)
+	junction_counts = defaultdict(int)
 	
-			info1 = line1.rstrip()
-			info2 = line2.rstrip()
+	for alignment in HTSeq.BAM_Reader('%s/%s.bam' % (sample, sample)):
 
-			seq1 = next(i1).rstrip()
-			extra1 = next(i1).rstrip()
-			quality1 = next(i1).rstrip()
+		if alignment.pe_which == 'first' and alignment.aligned and alignment.aQual > 5 and alignment.iv.chrom != 'MT' and alignment.iv.chrom != 'AB325691' and alignment.iv.chrom != 'MTR':
 
-			seq2 = next(i2).rstrip()
-			extra2 = next(i2).rstrip()
-			quality2 = next(i2).rstrip()
- 
-			if info1 != info2:
-				print 'Error: %s does not match %s' % (info1, info2)
+			introns = set()
+			junctions = set()
 
-			if seq1[:24] in target_repos:
-				target = target_repos[seq1[:24]]
-				out1.append('%s;%s\n%s\n%s\n%s\n' % (info1, target[0], seq1[target[1]:], extra1, quality1[target[1]:]))
-				out2.append('%s;%s\n%s\n%s\n%s\n' % (info2, target[0], seq2, extra2, quality2))
-
-	with gzip.open('%s/%s_R1_split.fastq.gz' % (infile, infile) ,'wb') as out:
-		out.write(''.join(out1))
-
-	with gzip.open('%s/%s_R2_split.fastq.gz' % (infile, infile) , 'wb') as out:
-		out.write(''.join(out2))
-
-def pool(infile, introns, junction_anchor):
-	intron_counts = collections.Counter()
-	junction_counts = collections.Counter()
-
-	ambiguous_introns = 0
-	ambiguous_junctions = 0
-
-	numProcessed = 0
-	local_start_time = time.time()
-
-	logging.info('\t\tProcessing Alignment Fragments')
-	logging.info('\t\t\tPaired reads after trimming')
-	for first, second in HTSeq.pair_SAM_alignments_with_buffer(HTSeq.BAM_Reader('%s/%s_mapq.bam' % (infile, infile))):
-		intron_ids = set()
-		junction_ids = set()
-		potential_junction_ids = set()
-		if first != None and first.aligned and first.aQual > 5:
-			pre_match = False
-			junction_occured = False
-			for cigop in first.cigar:
+			for i, cigop in enumerate(alignment.cigar):
 				if cigop.type == 'M':
-					if not junction_occured:
-						pre_match = cigop.size > junction_anchor
-					else:
-						if pre_match and cigop.size > junction_anchor:
-							junction_ids |= potential_junction_ids
-							pre_match = cigop.size > junction_anchor
-							junction_occured = False
-					for iv, val in introns[cigop.ref_iv].steps():
-						intron_ids |= val
+					for iv, val in targets[cigop.ref_iv].steps():
+						introns |= val
 				elif cigop.type == 'N':
-					junction_occured = True
-					for iv, val in introns[cigop.ref_iv].steps():
-						potential_junction_ids |= val
-		if second != None and second.aligned and second.aQual > 5:
-			pre_match = False
-			junction_occured = False
-			for cigop in second.cigar:
-				if cigop.type == 'M':
-					if not junction_occured:
-						pre_match = cigop.size > junction_anchor
-					else:
-						if pre_match and cigop.size > junction_anchor:
-							junction_ids |= potential_junction_ids
-							pre_match = cigop.size > junction_anchor
-							junction_occured = False
-					for iv, val in introns[cigop.ref_iv].steps():
-						intron_ids |= val
-				elif cigop.type == 'N':
-					junction_occured = True
-					for iv, val in introns[cigop.ref_iv].steps():
-						potential_junction_ids |= val
+					if alignment.cigar[i-1].type =='M' and alignment.cigar[i-1].size > 3 and alignment.cigar[i+1].type =='M' and alignment.cigar[i+1].size > 3:
+						for iv, val in targets[cigop.ref_iv].steps():
+							junctions |= val
 
-		candidateGenes = set()
-		toRemove = set()
-		for i in junction_ids:
-			candidateGenes.add(i.split(';')[0])
-		for i in intron_ids:
-			if i not in junction_ids:
-				candidateGenes.add(i.split(';')[0])
-			else:
-				toRemove.add(i)
+						chrom = cigop.ref_iv.chrom
+						if cigop.ref_iv.strand == '+':
+							first = cigop.ref_iv.end
+							second = cigop.ref_iv.start + 1
+							strand = '-'
+						else:
+							first = cigop.ref_iv.start + 1
+							second = cigop.ref_iv.end
+							strand = '+'
 
-		for i in toRemove:
-			intron_ids.remove(i)
+						if (chrom, first, strand) in fiveSS and (chrom, second, strand) in threeSS:
+							up = fiveSS[chrom, first, strand]
+							down = threeSS[chrom, second, strand]
+							if up[0] == down[0]:
+								if up[1] == down[1]:
+									junction_counts[(sample, up[0], int(up[1]), int(down[1])+1, "Constituitive")] += 1
+								else:
+									junction_counts[(sample, up[0], int(up[1]), int(down[1])+1, "Exon Skipping")] += 1
+						elif (chrom, first, strand) in fiveSS:
+							junction_counts[(sample, up[0], int(up[1]), int(down[1])+1, "Alternative 3'")] += 1
+						elif (chrom, second, strand) in threeSS:
+							junction_counts[(sample, up[0], int(up[1]), int(down[1])+1, "Alternative 5'")] += 1
 
-		if len(candidateGenes) == 1:
-			for intron_id in list(intron_ids):
-				intron_counts[intron_id] += 1
-		elif len(candidateGenes) > 1:
-			ambiguous_introns += 1
+			candidate_genes = set()
+			for i in introns:
+				candidate_genes.add(i)
+			for i in junctions:
+				candidate_genes.add(i)
 
-		if len(candidateGenes) == 1:
-			for junction_id in list(junction_ids):
-				junction_counts[junction_id] += 1
-		elif len(junction_ids) > 1:
-			ambiguous_junctions += 1
+			if len(candidate_genes) == 1:
+				for i in junctions:
+					SI_counts[('mature', i)] += 1
+				for i in introns:
+					SI_counts[('premature', i)] +=1
 
-		if numProcessed > 0 and numProcessed % 1000000 == 0:
-			logging.info('\t\t\t\tProcessed %d Fragments in %ds' % (numProcessed, time.time()-local_start_time))
-		numProcessed += 1
+	with open('%s/%s_counts.txt' % (sample, sample), 'w') as out:
+		out.write('Intron\tMature\tPremature\n')
+		for intron in sorted(intron_set):
+			out.write('%s\t%d\t%d\n' % (intron, SI_counts[('mature', intron)], SI_counts[('premature', intron)]))
 
-	logging.info('\t\t\tSingletons after trimming')
-	for read in HTSeq.BAM_Reader('%s/%s_singleR1.bam' % (infile, infile)):
-		intron_ids = set()
-		junction_ids = set()
-		potential_junction_ids = set()
+	with open('SI_summary.txt', 'a') as out:
+		for intron in sorted(intron_set):
+			out.write('%s\t%s\t%d\t%d\n' % (sample, intron, SI_counts[('mature', intron)], SI_counts[('premature', intron)]))
 
-		if read != None and read.aligned and read.aQual > 5:
-			pre_match = False
-			junction_occured = False
-			for cigop in read.cigar:
-				if cigop.type == 'M':
-					if not junction_occured:
-						pre_match = cigop.size > junction_anchor
-					else:
-						if pre_match and cigop.size > junction_anchor:
-							junction_ids |= potential_junction_ids
-							pre_match = cigop.size > junction_anchor
-							junction_occured = False
-					for iv, val in introns[cigop.ref_iv].steps():
-						intron_ids |= val
-				elif cigop.type == 'N':
-					junction_occured = True
-					for iv, val in introns[cigop.ref_iv].steps():
-						potential_junction_ids |= val
+	with open('%s/%s_junctionCounts.txt' % (sample, sample), 'w') as out:
+		out.write('Gene\tUpstream\tDownstream\tType\tCount\n')
+		for junc in sorted(junction_counts):
+			out.write('%s\t%d\t%d\t%s\t%d\n' % (junc[1], junc[2], junc[3], junc[4], junction_counts[junc]))
 
-		candidateGenes = set()
-		toRemove = set()
-		for i in junction_ids:
-			candidateGenes.add(i.split(';')[0])
-		for i in intron_ids:
-			if i not in junction_ids:
-				candidateGenes.add(i.split(';')[0])
-			else:
-				toRemove.add(i)
+	with open('Junction_summary.txt', 'a') as out:
+		for junc in sorted(junction_counts):
+			out.write('%s\t%s\t%d\t%d\t%s\t%d\n' % (sample, junc[1], junc[2], junc[3], junc[4], junction_counts[junc]))
 
-		for i in toRemove:
-			intron_ids.remove(i)
-
-		if len(candidateGenes) == 1:
-			for intron_id in list(intron_ids):
-				intron_counts[intron_id] += 1
-		elif len(candidateGenes) > 1:
-			ambiguous_introns += 1
-
-		if len(candidateGenes) == 1:
-			for junction_id in list(junction_ids):
-				junction_counts[junction_id] += 1
-		elif len(junction_ids) > 1:
-			ambiguous_junctions += 1
-
-	for read in HTSeq.BAM_Reader('%s/%s_singleR2.bam' % (infile, infile)):
-		intron_ids = set()
-		junction_ids = set()
-		potential_junction_ids = set()
-
-		if read != None and read.aligned and read.aQual > 5:
-			pre_match = False
-			junction_occured = False
-			for cigop in read.cigar:
-				if cigop.type == 'M':
-					if not junction_occured:
-						pre_match = cigop.size > junction_anchor
-					else:
-						if pre_match and cigop.size > junction_anchor:
-							junction_ids |= potential_junction_ids
-							pre_match = cigop.size > junction_anchor
-							junction_occured = False
-					for iv, val in introns[cigop.ref_iv].steps():
-						intron_ids |= val
-				elif cigop.type == 'N':
-					junction_occured = True
-					for iv, val in introns[cigop.ref_iv].steps():
-						potential_junction_ids |= val
-
-		candidateGenes = set()
-		toRemove = set()
-		for i in junction_ids:
-			candidateGenes.add(i.split(';')[0])
-		for i in intron_ids:
-			if i not in junction_ids:
-				candidateGenes.add(i.split(';')[0])
-			else:
-				toRemove.add(i)
-
-		for i in toRemove:
-			intron_ids.remove(i)
-
-		if len(candidateGenes) == 1:
-			for intron_id in list(intron_ids):
-				intron_counts[intron_id] += 1
-		elif len(candidateGenes) > 1:
-			ambiguous_introns += 1
-
-		if len(candidateGenes) == 1:
-			for junction_id in list(junction_ids):
-				junction_counts[junction_id] += 1
-		elif len(junction_ids) > 1:
-			ambiguous_junctions += 1
-
-	logging.info('\t\tProcessed %d Fragments in %ds' % (numProcessed, time.time()-local_start_time))
-
-	logging.info('\tCalculating Splicing Information')
-	combined = set()
-	for feature in intron_counts.keys():
-		combined.add(feature)
-	for feature in junction_counts.keys():
-		combined.add(feature)
-
-	with open('%s/%s_splicingCounts.txt' % (infile, infile), 'w') as splicingOut:
-		for feature in sorted(combined):
-			splicingOut.write('%s\t%d\t%d\n' % (feature, junction_counts[feature], intron_counts[feature]))
+def printSummary(samples, summary):
+	categories = ['read1_pre','base1_pre','read1_post','base1_post','read2_pre','base2_pre','read2_post','base2_post','passed','fail_low_quality','fail_N','fail_short','reads_trimmed','bases_trimmed','duplication','insert_size', 'unique', 'total_pairs_umi', '0_concordant_umi', '1_concordant_umi', '>1_concordant_umi', '1_discordant_umi', 'unpaired_umi', '0_unpaired_umi', '1_unpaired_umi', '>1_unpaired_umi', 'overall_alignment_rate_umi']
+	with open('MPE_summary.txt', 'w') as out:
+		out.write('Sample\t%s\n' % ('\t'.join(categories)))
+		for sample in samples:
+			out.write('%s\t%s\n' % (sample, '\t'.join([str(summary[(sample, category)]) for category in categories])))
 
 def parseArguments():
 	parser = argparse.ArgumentParser(prog="MPE_PipeLine_PE", description='', usage='%(prog)s [options]')
 	required = parser.add_argument_group('required arguments')
-	dup_mole = parser.add_argument_group('Extracting Molecular Counter / PCR Duplicate Removal Options')
-	trim = parser.add_argument_group('Trimming Options')
-	alignment = parser.add_argument_group('Alignment Options')
-	pool = parser.add_argument_group('Pooling Options')
 	required.add_argument('-i', '--input_files', nargs='+', required=True, help=' Basename of files to run. (fastq.gz)', metavar='', dest='input_files')
-	dup_mole.add_argument('-m', '--molecularCounterLen', type=int, default=7, help=" Length of Molecular Counter at 5' end of Read 1. (Default: 7)", metavar='', dest='moleCountLen')
-	dup_mole.add_argument('--skip_PCRMC', action='store_true', help=' Skip the removal of PCR duplicates and extraction of the molecular counter. Assumes files already exist.', dest='skipPCRMC')
-	trim.add_argument('--skip_Trim', action='store_true', help=' Skip the trimming of adapter sequences. Assumes files already exist.', dest='skipTrim')
-	trim.add_argument('--trimmomatic_jar', default='/opt/Trimmomatic-0.36/trimmomatic-0.36.jar', help=' Path to Trimmomatic jar file.', dest='trimJar')
-	trim.add_argument('--trimmomatic_adapter', default='/opt/Trimmomatic-0.36/adapters/NexteraPE-PE.fa', help=' Path to adapter file.', dest='trimAdapter')
-	alignment.add_argument('--skip_Align', action='store_true', help=' Skip the alignment of reads to genome. Assumes files already exist.', dest='skipAlignment')
+	mole = parser.add_argument_group('Extracting Molecular Counter Options')
+	duplicate = parser.add_argument_group('UMI Deduplication Options')
+	alignment = parser.add_argument_group('Alignment Options')
+	target_count = parser.add_argument_group('Target Counting Options')
+	mole.add_argument('-m', '--umi_length', type=int, default=7, help=" Length of Molecular Counter at 5' end of Read 1. (Default: 7)", metavar='', dest='moleCountLen')
+	duplicate.add_argument('-d', '--umi_deduplication', type=bool, default=False, help=' Perform UMI deduplication. (Default: False)', metavar='', dest='umi_deduplication')
 	alignment.add_argument('--hisat_index', default='~/Lab/Genomes/pombe/hisat/sp_hisatIndex_v2.30', help=' Location of hisat index files.', dest='hisatIndex')
-	alignment.add_argument('--skip_Singletons', action='store_true', help=' Do not attempt to align singleton reads resulting from trimming.', dest='skipSingletons')
-	alignment.add_argument('--skip_Split', action='store_true', help=' Do not attempt to realign reads after removing target specific region.', dest='skipSplit')
-	pool.add_argument('--skip_Pool', action='store_true', help=' Skip the pooling of reads. Assumes files already exist.', dest='skipPool')
-	pool.add_argument('--intron_intervals', default='/home/zdwyer/Lab/Genomes/pombe/sp_intronRanges_v2.30.txt', help=' File containing intervals for which to count reads.', dest='intron_intervals')
-	pool.add_argument('--targets', default='/home/zdwyer/Lab/MPE/pombe/oligoMix_information.txt', help=' File information about target sequences.', dest='targets')
-	pool.add_argument('--junction_anchor', default=3, type=int, help=' Required length of anchor on each side of junction.', dest='junction_anchor')
+	target_count.add_argument('--target_intervals', default='/home/zdwyer/Lab/Genomes/pombe/sp_mpe_subset_intronRanges_v2.30.bed', help=' File containing intervals for which to count reads.', dest='target_intervals')
+
 	return parser.parse_args()
 
 args = parseArguments()
+
 main(args)

@@ -103,7 +103,7 @@ def align(infile):
 		alignOut.write(err)
 
 def pool(infile):
-	interval_path = '/home/zdwyer/Lab/Genomes/pombe/sp_intronRanges_v2.30.txt'
+	interval_path = '/home/zdwyer/Lab/Genomes/pombe/sp_mpe_subset_intronRanges_v2.30.txt'
 	# Read in features
 	feats = set()
 	features = HTSeq.GenomicArrayOfSets("auto", stranded=False)
