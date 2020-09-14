@@ -1,5 +1,7 @@
 #!/usr/bin/env python2.7
 
+#TO FIX: Make split reads work for 25 and 26 bp gene specific regions
+
 import argparse, subprocess, os, gzip, logging, time, collections, HTSeq
 from itertools import izip_longest
 
@@ -17,6 +19,9 @@ def main(args):
 		iv = HTSeq.GenomicInterval(fields[1], int(fields[2])-1, int(fields[3]))
 		introns[iv] += fields[0]
 
+	target_repos = processTargets(args.targets)
+
+
 	for n, i in enumerate(args.input_files):
 
 		sample_start_time = time.time()
@@ -29,27 +34,28 @@ def main(args):
 		# Create folder for each sample
 		if not os.path.exists(infile):
 			os.makedirs(infile)
-		
-		# Extract Molecular Counter and Remove PCR Duplicates
-		if not args.skipPCRMC:
-			logging.info('\tRemoving PCR Duplicates and Extracting Molecular Counter')
-			removePCRDuplicates_ExtractMolecularCounter(i, infile, args.moleCountLen)
-		else:
-			logging.info('\tSkipping Removal of PCR Duplicates and Extracting Molecular Counter')
 
 		# Trim adapter sequences
 		if not args.skipTrim:
 			logging.info('\tTrimming Adapter Sequences')
-			trimAdapters(infile, args.trimJar, args.trimAdapter)
+			trimAdapters(i, infile, args.trimJar, args.trimAdapter)
 		else:
 			logging.info('\tSkipping Trimming of Adapter Sequences')
+		
+		# Extract Molecular Counter and Remove PCR Duplicates
+		if not args.skipPCRMC:
+			logging.info('\tRemoving PCR Duplicates and Extracting Molecular Counter')
+			removePCRDuplicates_ExtractMolecularCounter(infile, args.moleCountLen)
+		else:
+			logging.info('\tSkipping Removal of PCR Duplicates and Extracting Molecular Counter')
 
 		# Alignment
 		if not args.skipAlignment:
 			logging.info('\tAligning Reads to Genome')
-			align(infile, args.hisatIndex, args.skipSingletons)
+			align(infile, args.hisatIndex, args.skipSingletons, target_repos)
 		else:
 			logging.info('\tSkipping Alignment of Reads to Genome')
+
 
 		# Pool Reads
 		if not args.skipPool:
@@ -58,19 +64,41 @@ def main(args):
 		else:
 			logging.info('\tSkipping Pooling of Reads')
 
-
 	logging.info('Total Time: %ds' % (time.time()-global_start_time))
 
-def removePCRDuplicates_ExtractMolecularCounter(full_path, infile, n):
+def processTargets(infile):
+	
+	repos = {}
+	
+	for line in open(infile):
+		cur = line.rstrip().split('\t')
+		target_seq = cur[4]
+		for pos in range(24):
+			for base in ['A', 'C', 'G', 'T']:
+				repos['%s%s%s' % (target_seq[:pos], base, target_seq[pos+1:])] = ('%s;%s' % (cur[0], cur[1]), len(target_seq))
+	
+	return repos
+
+def trimAdapters(full_path, infile, trimmomatic_jar, trimmomatic_adapters):
+	cmd = 'java -jar %s PE -phred33 %s_R1.fastq.gz %s_R2.fastq.gz %s/%s_R1_P.fastq.gz %s/%s_R1_U.fastq.gz %s/%s_R2_P.fastq.gz %s/%s_R2_U.fastq.gz ILLUMINACLIP:%s:2:30:10:2:true' % (trimmomatic_jar, full_path, full_path, infile, infile, infile, infile, infile, infile, infile, infile, trimmomatic_adapters)
+	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+	(out, err) = proc.communicate()
+	with open('%s/%s_trim.log' % (infile, infile), 'w') as trimOut:
+		trimOut.write(err)
+	info = err.split('\n')[9].split(' ')
+	#logging.info('\t\tInput Read Pairs: %s\n\t\t\t\tBoth Surviving: %s\n\t\t\t\tForward Only Surviving: %s\n\t\t\t\tReverse Only Surviving: %s\n\t\t\t\tDropped: %s' % (info[3], info[6], info[11], info[16], info[19]))
+
+def removePCRDuplicates_ExtractMolecularCounter(infile, n):
 
 	occured = set()
 	numProcessed = 0
 	numUnique = 0
+	numShort = 0
 	out1 = []
 	out2 = []
 	local_start_time = time.time()
 
-	with gzip.open('%s_R1.fastq.gz' % (full_path)) as i1, gzip.open('%s_R2.fastq.gz' % (full_path)) as i2:
+	with gzip.open('%s/%s_R1_P.fastq.gz' % (infile, infile)) as i1, gzip.open('%s/%s_R2_P.fastq.gz' % (infile, infile)) as i2:
 		for line1, line2 in izip_longest(i1, i2):
 			
 			info1 = line1.rstrip().split(' ')[0]
@@ -87,7 +115,9 @@ def removePCRDuplicates_ExtractMolecularCounter(full_path, infile, n):
 			if info1 != info2:
 				print 'Error: %s does not match %s' % (info1, info2)
 
-			if (seq1, seq2) not in occured:
+			if len(seq1) < n + 10 or len(seq2) < n:
+				numShort += 1
+			elif (seq1, seq2) not in occured:
 				out1.append('%s;%s\n%s\n%s\n%s\n' % (info1, seq1[:n], seq1[n:], extra1, quality1[n:]))
 				out2.append('%s;%s\n%s\n%s\n%s\n' % (info2, seq1[:n], seq2, extra2, quality2))
 				numUnique += 1
@@ -99,6 +129,8 @@ def removePCRDuplicates_ExtractMolecularCounter(full_path, infile, n):
 			numProcessed += 1
 
 	logging.info('\t\tProcessed %d Total Reads in %ds' % (numProcessed, time.time()-local_start_time))
+	logging.info('\t\t\t%d unique reads (%.2f%%)' % (numUnique, numUnique*100.0/numProcessed))
+	logging.info('\t\t\t%d reads removed for being shorter than %d bp' % (numShort, n+10))
 
 	logging.info('\t\tWriting Processed Read 1')
 	start_time = time.time()
@@ -112,19 +144,10 @@ def removePCRDuplicates_ExtractMolecularCounter(full_path, infile, n):
 		out.write(''.join(out2))
 	logging.info('\t\t\tWrote %d reads in %ds' % (numUnique, time.time()-start_time))
 
-def trimAdapters(infile, trimmomatic_jar, trimmomatic_adapters):
-	cmd = 'java -jar %s PE -phred33 %s/%s_R1_dupMole.fastq.gz %s/%s_R2_dupMole.fastq.gz %s/%s_R1_P.fastq.gz %s/%s_R1_U.fastq.gz %s/%s_R2_P.fastq.gz %s/%s_R2_U.fastq.gz ILLUMINACLIP:%s:2:30:10 MINLEN:5' % (trimmomatic_jar, infile, infile, infile, infile, infile, infile, infile, infile, infile, infile, infile, infile, trimmomatic_adapters)
-	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-	(out, err) = proc.communicate()
-	with open('%s/%s_trim.log' % (infile, infile), 'w') as trimOut:
-		trimOut.write(err)
-	info = err.split('\n')[9].split(' ')
-	logging.info('\t\tInput Read Pairs: %s\n\t\t\t\tBoth Surviving: %s\n\t\t\t\tForward Only Surviving: %s\n\t\t\t\tReverse Only Surviving: %s\n\t\t\t\tDropped: %s' % (info[3], info[6], info[11], info[16], info[19]))
-
-def align(infile, index, skipSingletons):
+def align(infile, index, skipSingletons, target_repos):
 	logging.info('\t\tUsing hisat index at %s' % (index))
 	logging.info('\t\tAligning Paired Reads')
-	cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 --un-conc-gz %s/%s_unaligned_R%%.fastq.gz -x %s -1 %s/%s_R1_P.fastq.gz -2 %s/%s_R2_P.fastq.gz | samtools view -bh -q 5 - | samtools sort - -o %s/%s.bam' % (infile, infile, index, infile, infile, infile, infile, infile, infile)
+	cmd = 'hisat2 -p 4 --phred33 --new-summary --max-intronlen 1000 --un-conc-gz %s/%s_unaligned_R%%.fastq.gz -x %s -1 %s/%s_R1_dupMole.fastq.gz -2 %s/%s_R2_dupMole.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s.bam' % (infile, infile, index, infile, infile, infile, infile, infile, infile)
 	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
 	(out, err) = proc.communicate()
 	with open('%s/%s_alignment.log' % (infile, infile), 'w') as alignOut:
@@ -132,9 +155,21 @@ def align(infile, index, skipSingletons):
 			alignOut.write("Paired Reads:\n")
 		alignOut.write(err)
 
+	cmd = 'bedtools bamtobed -i %s/%s.bam | bedtools merge -o count -c 4 -i stdin | bedtools intersect -b ~/Lab/MPE/pombe/oligoMix_Locations.bed -a stdin -v | sort -k4,4nr > %s/%s_offtargets.bed' % (infile, infile, infile, infile)
+	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+	(out, err) = proc.communicate()
+
+	cmd = 'samtools view -bh -q 5 %s/%s.bam > %s/%s_mapq.bam' % (infile, infile, infile, infile)
+	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+	(out, err) = proc.communicate()
+
+	cmd = 'bedtools bamtobed -i %s/%s_mapq.bam | bedtools merge -o count -c 4 -i stdin | bedtools intersect -b ~/Lab/MPE/pombe/oligoMix_Locations.bed -a stdin -v | sort -k4,4nr > %s/%s_offtargets.bed' % (infile, infile, infile, infile)
+	proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+	(out, err) = proc.communicate()
+
 	if not skipSingletons:
 		logging.info('\t\tAligning R1 Singletons')
-		cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 -x %s -U %s/%s_R1_U.fastq.gz | samtools view -bh -q 5 - | samtools sort - -o %s/%s_singleR1.bam' % (index, infile, infile, infile, infile)
+		cmd = 'hisat2 -p 4 --phred33 --new-summary --max-intronlen 1000 -x %s -U %s/%s_R1_U.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s_singleR1.bam' % (index, infile, infile, infile, infile)
 		proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
 		(out, err) = proc.communicate()
 		with open('%s/%s_alignment.log' % (infile, infile), 'a') as alignOut:
@@ -142,7 +177,7 @@ def align(infile, index, skipSingletons):
 			alignOut.write(err)
 
 		logging.info('\t\tAligning R2 Singletons')
-		cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 -x %s -U %s/%s_R2_U.fastq.gz | samtools view -bh -q 5 - | samtools sort - -o %s/%s_singleR2.bam' % (index, infile, infile, infile, infile)
+		cmd = 'hisat2 -p 4 --phred33 --new-summary --max-intronlen 1000 -x %s -U %s/%s_R2_U.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s_singleR2.bam' % (index, infile, infile, infile, infile)
 		proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
 		(out, err) = proc.communicate()
 		with open('%s/%s_alignment.log' % (infile, infile), 'a') as alignOut:
@@ -150,6 +185,51 @@ def align(infile, index, skipSingletons):
 			alignOut.write(err)
 	else:
 		logging.info('\t\tSkipping Alignment of singletons resulting from trimming')
+
+	if not args.skipSplit:
+		logging.info('\t\tSplitting Reads')
+		splitReads(infile, target_repos)
+		logging.info('\t\tAligning Split Reads')
+		cmd = 'hisat2 -p 4 --phred33 --max-intronlen 1000 -x %s -1 %s/%s_R1_split.fastq.gz -2 %s/%s_R2_split.fastq.gz | samtools view -bh - | samtools sort - -o %s/%s_split.bam' % (index, infile, infile, infile, infile, infile, infile)
+		proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+		(out, err) = proc.communicate()
+		with open('%s/%s_alignment_split.log' % (infile, infile), 'w') as alignOut:
+			if not skipSingletons:
+				alignOut.write("Paired Reads:\n")
+			alignOut.write(err)
+
+def splitReads(infile, target_repos):
+
+	out1 = []
+	out2 = []
+
+	with gzip.open('%s/%s_unaligned_R1.fastq.gz' % (infile, infile)) as i1, gzip.open('%s/%s_unaligned_R2.fastq.gz' % (infile, infile)) as i2:
+		for line1, line2 in izip_longest(i1, i2):
+	
+			info1 = line1.rstrip()
+			info2 = line2.rstrip()
+
+			seq1 = next(i1).rstrip()
+			extra1 = next(i1).rstrip()
+			quality1 = next(i1).rstrip()
+
+			seq2 = next(i2).rstrip()
+			extra2 = next(i2).rstrip()
+			quality2 = next(i2).rstrip()
+ 
+			if info1 != info2:
+				print 'Error: %s does not match %s' % (info1, info2)
+
+			if seq1[:24] in target_repos:
+				target = target_repos[seq1[:24]]
+				out1.append('%s;%s\n%s\n%s\n%s\n' % (info1, target[0], seq1[target[1]:], extra1, quality1[target[1]:]))
+				out2.append('%s;%s\n%s\n%s\n%s\n' % (info2, target[0], seq2, extra2, quality2))
+
+	with gzip.open('%s/%s_R1_split.fastq.gz' % (infile, infile) ,'wb') as out:
+		out.write(''.join(out1))
+
+	with gzip.open('%s/%s_R2_split.fastq.gz' % (infile, infile) , 'wb') as out:
+		out.write(''.join(out2))
 
 def pool(infile, introns, junction_anchor):
 	intron_counts = collections.Counter()
@@ -162,7 +242,8 @@ def pool(infile, introns, junction_anchor):
 	local_start_time = time.time()
 
 	logging.info('\t\tProcessing Alignment Fragments')
-	for first, second in HTSeq.pair_SAM_alignments_with_buffer(HTSeq.BAM_Reader('%s/%s.bam' % (infile, infile))):
+	logging.info('\t\t\tPaired reads after trimming')
+	for first, second in HTSeq.pair_SAM_alignments_with_buffer(HTSeq.BAM_Reader('%s/%s_mapq.bam' % (infile, infile))):
 		intron_ids = set()
 		junction_ids = set()
 		potential_junction_ids = set()
@@ -204,10 +285,17 @@ def pool(infile, introns, junction_anchor):
 						potential_junction_ids |= val
 
 		candidateGenes = set()
-		for i in intron_ids:
-			candidateGenes.add(i.split(';')[0])
+		toRemove = set()
 		for i in junction_ids:
 			candidateGenes.add(i.split(';')[0])
+		for i in intron_ids:
+			if i not in junction_ids:
+				candidateGenes.add(i.split(';')[0])
+			else:
+				toRemove.add(i)
+
+		for i in toRemove:
+			intron_ids.remove(i)
 
 		if len(candidateGenes) == 1:
 			for intron_id in list(intron_ids):
@@ -222,8 +310,107 @@ def pool(infile, introns, junction_anchor):
 			ambiguous_junctions += 1
 
 		if numProcessed > 0 and numProcessed % 1000000 == 0:
-			logging.info('\t\tProcessed %d Fragments in %ds' % (numProcessed, time.time()-local_start_time))
+			logging.info('\t\t\t\tProcessed %d Fragments in %ds' % (numProcessed, time.time()-local_start_time))
 		numProcessed += 1
+
+	logging.info('\t\t\tSingletons after trimming')
+	for read in HTSeq.BAM_Reader('%s/%s_singleR1.bam' % (infile, infile)):
+		intron_ids = set()
+		junction_ids = set()
+		potential_junction_ids = set()
+
+		if read != None and read.aligned and read.aQual > 5:
+			pre_match = False
+			junction_occured = False
+			for cigop in read.cigar:
+				if cigop.type == 'M':
+					if not junction_occured:
+						pre_match = cigop.size > junction_anchor
+					else:
+						if pre_match and cigop.size > junction_anchor:
+							junction_ids |= potential_junction_ids
+							pre_match = cigop.size > junction_anchor
+							junction_occured = False
+					for iv, val in introns[cigop.ref_iv].steps():
+						intron_ids |= val
+				elif cigop.type == 'N':
+					junction_occured = True
+					for iv, val in introns[cigop.ref_iv].steps():
+						potential_junction_ids |= val
+
+		candidateGenes = set()
+		toRemove = set()
+		for i in junction_ids:
+			candidateGenes.add(i.split(';')[0])
+		for i in intron_ids:
+			if i not in junction_ids:
+				candidateGenes.add(i.split(';')[0])
+			else:
+				toRemove.add(i)
+
+		for i in toRemove:
+			intron_ids.remove(i)
+
+		if len(candidateGenes) == 1:
+			for intron_id in list(intron_ids):
+				intron_counts[intron_id] += 1
+		elif len(candidateGenes) > 1:
+			ambiguous_introns += 1
+
+		if len(candidateGenes) == 1:
+			for junction_id in list(junction_ids):
+				junction_counts[junction_id] += 1
+		elif len(junction_ids) > 1:
+			ambiguous_junctions += 1
+
+	for read in HTSeq.BAM_Reader('%s/%s_singleR2.bam' % (infile, infile)):
+		intron_ids = set()
+		junction_ids = set()
+		potential_junction_ids = set()
+
+		if read != None and read.aligned and read.aQual > 5:
+			pre_match = False
+			junction_occured = False
+			for cigop in read.cigar:
+				if cigop.type == 'M':
+					if not junction_occured:
+						pre_match = cigop.size > junction_anchor
+					else:
+						if pre_match and cigop.size > junction_anchor:
+							junction_ids |= potential_junction_ids
+							pre_match = cigop.size > junction_anchor
+							junction_occured = False
+					for iv, val in introns[cigop.ref_iv].steps():
+						intron_ids |= val
+				elif cigop.type == 'N':
+					junction_occured = True
+					for iv, val in introns[cigop.ref_iv].steps():
+						potential_junction_ids |= val
+
+		candidateGenes = set()
+		toRemove = set()
+		for i in junction_ids:
+			candidateGenes.add(i.split(';')[0])
+		for i in intron_ids:
+			if i not in junction_ids:
+				candidateGenes.add(i.split(';')[0])
+			else:
+				toRemove.add(i)
+
+		for i in toRemove:
+			intron_ids.remove(i)
+
+		if len(candidateGenes) == 1:
+			for intron_id in list(intron_ids):
+				intron_counts[intron_id] += 1
+		elif len(candidateGenes) > 1:
+			ambiguous_introns += 1
+
+		if len(candidateGenes) == 1:
+			for junction_id in list(junction_ids):
+				junction_counts[junction_id] += 1
+		elif len(junction_ids) > 1:
+			ambiguous_junctions += 1
 
 	logging.info('\t\tProcessed %d Fragments in %ds' % (numProcessed, time.time()-local_start_time))
 
@@ -254,8 +441,10 @@ def parseArguments():
 	alignment.add_argument('--skip_Align', action='store_true', help=' Skip the alignment of reads to genome. Assumes files already exist.', dest='skipAlignment')
 	alignment.add_argument('--hisat_index', default='~/Lab/Genomes/pombe/hisat/sp_hisatIndex_v2.30', help=' Location of hisat index files.', dest='hisatIndex')
 	alignment.add_argument('--skip_Singletons', action='store_true', help=' Do not attempt to align singleton reads resulting from trimming.', dest='skipSingletons')
+	alignment.add_argument('--skip_Split', action='store_true', help=' Do not attempt to realign reads after removing target specific region.', dest='skipSplit')
 	pool.add_argument('--skip_Pool', action='store_true', help=' Skip the pooling of reads. Assumes files already exist.', dest='skipPool')
 	pool.add_argument('--intron_intervals', default='/home/zdwyer/Lab/Genomes/pombe/sp_intronRanges_v2.30.txt', help=' File containing intervals for which to count reads.', dest='intron_intervals')
+	pool.add_argument('--targets', default='/home/zdwyer/Lab/MPE/pombe/oligoMix_information.txt', help=' File information about target sequences.', dest='targets')
 	pool.add_argument('--junction_anchor', default=3, type=int, help=' Required length of anchor on each side of junction.', dest='junction_anchor')
 	return parser.parse_args()
 
