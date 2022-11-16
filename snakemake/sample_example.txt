@@ -1,0 +1,10 @@
+Sample	R1	R2
+spJP002_A	spJP002_A_R1.fastq.gz	spJP002_A_R2.fastq.gz
+spJP002_B	spJP002_B_R1.fastq.gz	spJP002_B_R2.fastq.gz
+spJP002_C	spJP002_C_R1.fastq.gz	spJP002_C_R2.fastq.gz
+ts102B12_A	ts_102B12_A_R1.fastq.gz	ts_102B12_A_R2.fastq.gz
+ts102B12_B	ts_102B12_B_R1.fastq.gz	ts_102B12_B_R2.fastq.gz
+ts102B12_C	ts_102B12_C_R1.fastq.gz	ts_102B12_C_R2.fastq.gz
+ts103E16_A	ts_103E16_A_R1.fastq.gz	ts_103E16_A_R2.fastq.gz
+ts103E16_B	ts_103E16_B_R1.fastq.gz	ts_103E16_B_R2.fastq.gz
+ts103E16_C	ts_103E16_C_R1.fastq.gz	ts_103E16_C_R2.fastq.gz

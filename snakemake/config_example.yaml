@@ -1,0 +1,11 @@
+data_dir: '/media/workdir/fastq'
+work_dir: '/media/workdir/'
+samples: '/media/workdir/MPE-seq/snakemake/resources/sample_example.txt'
+genome: 'media/workdir/genomes/SPombe_20201001.fa'
+features: 'media/workdir/genomes/SPombe_20201001.gff'
+targets: '/media/workdir/MPE-seq/snakemake/resources/mpe_subset.txt'
+trimming:
+  threads: 1
+alignment:
+  threads: 2
+  mapQ_filter: 5
