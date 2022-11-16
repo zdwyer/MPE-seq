@@ -1,11 +1,11 @@
-import argparse, HTSeq
+import HTSeq
 from collections import defaultdict
 
-def main(args):
+def main():
 
 	gene_strand = {}
 	genes = HTSeq.GenomicArrayOfSets("auto", stranded=True)
-	for line in open(args.genes):
+	for line in open(snakemake.input[2]):
 		cur = line.rstrip().split('\t')
 		gene_id = cur[3]
 		if cur[5] == '+':
@@ -20,7 +20,7 @@ def main(args):
 	five_prime = {}
 	three_prime = {} 
 
-	for line in open(args.exons):
+	for line in open(snakemake.input[3]):
 		cur = line.rstrip().split('\t')
 		chrom = cur[0]
 		left = int(cur[1])
@@ -38,7 +38,7 @@ def main(args):
 
 	junctions = defaultdict(int)
 
-	for alignment in HTSeq.BAM_Reader(args.alignment):
+	for alignment in HTSeq.BAM_Reader(snakemake.input[0]):
 		candidate_junctions = set()
 		if alignment !=None and alignment.pe_which == 'first' and alignment.aligned and alignment.aQual > 5:
 			for i, cigop in enumerate(alignment.cigar):
@@ -86,17 +86,7 @@ def main(args):
 			else:
 				output.append('%s;%d;%d;%s;NA;NA;Unannotated\t%d' % (chrom, left, right, gene, junctions[junction]))
 
-	with open(args.output, 'w') as out:
+	with open(snakemake.output[0], 'w') as out:
 		out.write('\n'.join(output))
 
-def parseArguments():
-	parser = argparse.ArgumentParser(prog="count_junctions_reannotated.py", description='', usage='%(prog)s [options]')
-	required = parser.add_argument_group('required arguments')
-	required.add_argument('-a', '--alignment', required=True, help=' Alignment file (.bam)', metavar='', dest='alignment')
-	required.add_argument('-g', '--genes', required=True, help=' File containing gene ranges (.bed)', metavar='', dest='genes')
-	required.add_argument('-e', '--exons', required=True, help=' File containing exon ranges (.bed)', metavar='', dest='exons')
-	required.add_argument('-o', '--output', required=True, help=' Output file containing counts', metavar='', dest='output')
-	return parser.parse_args()
-
-args = parseArguments()
-main(args)
+main()

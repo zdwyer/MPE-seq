@@ -1,11 +1,11 @@
 import argparse, HTSeq
 from collections import defaultdict
 
-def main(args):
+def main():
 	
 	intron_set = set()
 	targets = HTSeq.GenomicArrayOfSets("auto", stranded=True)
-	for line in open(args.introns):
+	for line in open(snakemake.input[2]):
 		fields = line.rstrip().split('\t')
 		if fields[5] == '+':
 			orientation = '-'
@@ -18,7 +18,7 @@ def main(args):
 	premature = defaultdict(int)
 	mature = defaultdict(int)
 
-	for alignment in HTSeq.BAM_Reader(args.alignment):
+	for alignment in HTSeq.BAM_Reader(snakemake.input[0]):
 
 		if alignment.pe_which == 'first' and alignment.aligned and alignment.aQual > 5:
 
@@ -45,18 +45,9 @@ def main(args):
 				for i in introns:
 					premature[i] += 1
 
-	with open(args.output, 'w') as out:
+	with open(snakemake.output[0], 'w') as out:
 		out.write('Intron\tMature\tPremature\n')
 		for intron in sorted(intron_set):
 			out.write('%s\t%d\t%d\n' % (intron, mature[intron], premature[intron]))
 
-def parseArguments():
-	parser = argparse.ArgumentParser(prog="", description='', usage='%(prog)s')
-	required = parser.add_argument_group('required arguments')
-	required.add_argument('-a', '--alignment', required=True, help='', metavar='', dest='alignment')
-	required.add_argument('-i', '--introns', required=True, help='', metavar='', dest='introns')
-	required.add_argument('-o', '--output', required=True, help='', metavar='', dest='output')
-	return parser.parse_args()
-
-args = parseArguments()
-main(args)
+main()

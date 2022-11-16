@@ -1,14 +1,16 @@
+#!/usr/bin/env python3
+
 import sys, argparse
 from collections import defaultdict
 
-def main(args):
+def main():
 
-	targets = read_targets(args.targets)
-	genes, alias, exons, introns, utr_5, utr_3 = read_features(args.feature)
-	write_genes(args.genes, genes)
-	write_alias(args.alias, alias)
-	write_exons(args.exons, exons, utr_5, utr_3)
-	write_introns(args.introns, args.target_out, introns, targets)
+	targets = read_targets(snakemake.input[1])
+	genes, alias, exons, introns, utr_5, utr_3 = read_features(snakemake.input[0])
+	write_genes(snakemake.output[0], genes)
+	write_alias(snakemake.output[4], alias)
+	write_exons(snakemake.output[1], exons, utr_5, utr_3)
+	write_introns(snakemake.output[2], snakemake.output[3], introns, targets)
 
 def read_targets(infile):
 	targets = set()
@@ -144,18 +146,4 @@ def write_introns(all_outfile, target_outfile, introns, targets):
 	with open(target_outfile, 'w') as out:
 		out.write('\n'.join(target_introns))
 
-def parseArguments():
-	parser = argparse.ArgumentParser(prog="", description='', usage='%(prog)s')
-	input = parser.add_argument_group('input arguments')
-	input.add_argument('-f', '--feature', required=True, help='', metavar='', dest='feature')
-	input.add_argument('-t', '--targets', required=True, help='', metavar='', dest='targets')
-	output = parser.add_argument_group('output arguments')
-	output.add_argument('-g', '--genes', required=True, help='', metavar='', dest='genes')
-	output.add_argument('-a', '--alias', required=True, help='', metavar='', dest='alias')
-	output.add_argument('-e', '--exons', required=True, help='', metavar='', dest='exons')
-	output.add_argument('-i', '--introns', required=True, help='', metavar='', dest='introns')
-	output.add_argument('-u', '--target_introns', required=True, help='', metavar='', dest='target_out')
-	return parser.parse_args()
-
-args = parseArguments()
-main(args)
+main()
