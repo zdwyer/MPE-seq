@@ -10,33 +10,32 @@ rule all:
 		'summary/junction_counts.txt',
 		'summary/feature_counts.txt'
 
-##################
-# Prepare Genome #
-##################
-#rule download_genome:
-#	output:
-#		'genome/genome_%s.fa.gz' % (config['genome_release_date'])
-#	threads: 1
-#	params:
-#		'--silent --create-dirs'
-#	shell:
-#		'curl https://curation.pombase.org/releases/pombase-%s/fasta/chromosomes/Schizosaccharomyces_pombe_all_chromosomes.fa.gz {params} --output {output}' % config['genome_release_date']
-#
-#rule unzip_genome:
-#	input:
-#		'genome/genome_%s.fa.gz' % (config['genome_release_date'])
-#	output:
-#		'genome/genome_%s.fa' % (config['genome_release_date'])
-#	threads: 1
-#	shell:
-#		'gunzip {input}'
+rule download_genome:
+	output:
+		'%s.gz' % config['genome']
+	threads: 1
+	params:
+		'--silent --create-dirs'
+	shell:
+		'curl %s {params} --output {output}' % config['genome_url']
 
-#rule download_annotation:
-#	output:
-#		'genome/annotation_%s.gff3' % (config['genome_release_date'])
-#	threads: 1
-#	shell:
-#		'wget -q -O genome/annotation_%s.gff3 ftp://ftp.pombase.org/pombe/releases/pombase-%s/gff/Schizosaccharomyces_pombe_all_chromosomes.gff3' % (config['genome_release_date'], config['genome_release_date'])
+rule unzip_genome:
+	input:
+		'%s.gz' % config['genome']
+	output:
+		config['genome']
+	threads: 1
+	shell:
+		'gunzip {input}'
+
+rule download_annotation:
+	output:
+		config['features']
+	threads: 1
+	params:
+		'--silent --create-dirs'
+	shell:
+		'curl %s {params} --output {output}' % config['features_url']
 
 rule trim:
 	input:
